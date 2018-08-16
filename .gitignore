@@ -1,0 +1,4 @@
+.idea
+.gradle
+out
+src/main/resources/config.properties
