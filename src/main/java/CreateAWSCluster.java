@@ -63,6 +63,10 @@ public class CreateAWSCluster {
         bootstrapHostParams.add(new BasicNameValuePair("realm", "public"));
         httpPost("/admin/v1/instance-admin", hostMap.get(hosts[0]), bootstrapHostParams, httpClient);
 
+
+        sleep();
+
+
         // 4. Loop through all other nodes in the array and join them to the bootstrap host
         for (int i = 1; i < hosts.length; i++) {
             LOG.info(MessageFormat.format("Adding: {0} to the cluster", hosts[i]));
@@ -82,6 +86,14 @@ public class CreateAWSCluster {
             builder.addBinaryBody("cluster-config.zip", currentClusterConfig,
                     ContentType.APPLICATION_OCTET_STREAM, "cluster-config.zip");
             httpPostBinaryData(htp, hostMap.get(hosts[i]), builder.build(), httpClient);
+        }
+    }
+
+    private static void sleep() {
+        try {
+            Thread.sleep(2500);
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
         }
     }
 
