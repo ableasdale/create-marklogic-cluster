@@ -1,4 +1,6 @@
 .idea
 .gradle
+*.iml
 out
 src/main/resources/config.properties
+out/production/resources/config.properties
