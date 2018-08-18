@@ -15,187 +15,152 @@ public class CreateClusterWithAdminGUI {
 
     public static void main(String[] args) {
 
+        String[] hosts = Configuration.getInstance().getStringArray("hosts");
+        String[] hostUrls = new String[hosts.length];
+
         WebClient webClient = new WebClient();
         webClient.setRefreshHandler(new ThreadedRefreshHandler());
-        // TODO - the redirect handling stuff doesn't seem to work?
-        //webClient.setRedirectEnabled(true);
-        //webClient.setThrowExceptionOnFailingStatusCode(false);
-        // For when we need them!
         DefaultCredentialsProvider credentialsProvider =
                 (DefaultCredentialsProvider) webClient.getCredentialsProvider();
-        credentialsProvider.addCredentials("admin", "admin");
+        credentialsProvider.addCredentials(Configuration.getInstance().getString("mluser"), Configuration.getInstance().getString("mlpass"));
 
-        HtmlPage page = null;
+        // 1. Initialize every host in the cluster
+        for (int i=0; i<hosts.length; i++) {
+            String hostUrl = String.format("http://%s:8001", hosts[i]);
+            hostUrls[i] = hostUrl;
+            LOG.info("Initialising: "+hosts[i] + " | "+hostUrls[i]);
+            checkPageAndSubmitForm(webClient, hostUrls[i], "Server Install - MarkLogic Server - localhost", "initialize");
+        }
+        sleep(5000);
+
+        // 2. Configure bootstrap host (hosts[0])
         try {
-            page = webClient.getPage("http://engrlab-129-015.engrlab.marklogic.com:8001");
+            // 2a: skip adding host to cluster
+            HtmlPage page = webClient.getPage(hostUrls[0]);
+            HtmlForm form = page.getFormByName("join-admin");
+            HtmlImageInput input = form.getInputByName("cancel");
+            page = (HtmlPage) input.click();
 
-            DomNodeList inputs = page.getElementsByTagName("b");
-            Iterator nodesIterator = inputs.iterator();
-
-            while (nodesIterator.hasNext()) {
-                DomNode element = (DomNode) nodesIterator.next();
-                if (element.getTextContent().equals("This server must now self-install the initial databases \n" +
-                        "and application servers.  Click OK to continue.")) {
-                    LOG.info("Need to initialize!");
-                }
+            // 2b: set up admin user
+            if(page.getTitleText().contains("Security Setup - MarkLogic Server")){
+                LOG.info("Confirmed "+ hosts[0] + " is now at the Security Setup Form");
             }
 
-            // find the okbutton
-            HtmlForm form = page.getFormByName("initialize");
-            //HtmlImageInput button = form.getInputByName("ok");
-            HtmlPage page2 = submitForm(page, form);
+            HtmlForm securityForm = page.getFormByName("security");
+            securityForm.getInputByName("user").setValueAttribute(Configuration.getInstance().getString("mluser"));
+            securityForm.getInputByName("password1").setValueAttribute(Configuration.getInstance().getString("mlpass"));
+            securityForm.getInputByName("password2").setValueAttribute(Configuration.getInstance().getString("mlpass"));
+            securityForm.getInputByName("wallet-password1").setValueAttribute(Configuration.getInstance().getString("mlpass"));
+            securityForm.getInputByName("wallet-password2").setValueAttribute(Configuration.getInstance().getString("mlpass"));
+            input = securityForm.getInputByName("ok");
+            page = (HtmlPage) input.click();
 
-
-            //final HtmlDivision div = page.getHtmlElementById("ok_button");
-
-            // At this point we have the server restart page
-            //Server Restart - MarkLogic Server - localhost
-            if (page2.getTitleText().equals("Server Restart - MarkLogic Server - localhost")) {
-                LOG.info("need to do a loop to wait");
-                // for now we'll just sleep for 10 seconds
-                sleep();
-                page2 = webClient.getPage("http://engrlab-129-015.engrlab.marklogic.com:8001");
+            if(page.getTitleText().contains("System Summary - MarkLogic Server")){
+                LOG.info("Confirmed "+ hostUrls[0] + " is the configured bootstrap host");
             }
-
-
-            // ensure this is the "join a cluster" page
-            if (page2.getTitleText().equals("Join a Cluster - MarkLogic Server - engrlab-129-015.engrlab.marklogic.com")) {
-                LOG.info("now at the Join a Cluster page");
-                HtmlForm form2 = page2.getFormByName("join-admin");
-                HtmlImageInput input = form2.getInputByName("cancel");
-                HtmlPage page3 = (HtmlPage) input.click();
-
-                if (page3.getTitleText().equals("Security Setup - MarkLogic Server - engrlab-129-015.engrlab.marklogic.com")) {
-                    LOG.info("Now at the Security Setup page");
-                    // enter the String "admin" 5 times:
-                    // <input type="text" size="35" value="" class="valid-text" name="user" id="user-text-input"/>
-                    // <input type="password" size="35" class="valid" name="password1" value=""/>
-                    // <input type="password" size="35" class="valid" name="password2" value=""/>
-                    // <input type="password" size="35" class="valid" name="wallet-password1" value=""/>
-                    // <input type="password" size="35" class="valid" name="wallet-password2" value=""/>
-                    HtmlForm securityForm = page3.getFormByName("security");
-                    securityForm.getInputByName("user").setValueAttribute("admin");
-                    securityForm.getInputByName("password1").setValueAttribute("admin");
-                    securityForm.getInputByName("password2").setValueAttribute("admin");
-                    securityForm.getInputByName("wallet-password1").setValueAttribute("admin");
-                    securityForm.getInputByName("wallet-password2").setValueAttribute("admin");
-
-                    HtmlImageInput okBtn = securityForm.getInputByName("ok");
-                    HtmlPage page4 = (HtmlPage) okBtn.click();
-                    LOG.info("Password / User should have been created");
-
-                    // Note: this would now throw a 401
-
-                    if (page4.getTitleText().equals("System Summary - MarkLogic Server - engrlab-129-015.engrlab.marklogic.com")) {
-                        LOG.info("Bootstrap host successfully created");
-                    }
-
-                }
-
-            }
-
-            LOG.info("----------------------------------------------");
-
+            LOG.info("------------------------------------------------------------------");
         } catch (IOException e) {
             e.printStackTrace();
         }
+        //System.exit(0);
 
-        // *****************************************************
-        // Set up second node and connect to the bootstrap host
-        // Bootstrap host: engrlab-129-015.engrlab.marklogic.com
-        // Second host: engrlab-129-040.engrlab.marklogic.com
-        // *****************************************************
+        // 3. Add remaining hosts to cluster
+        for (int i = 1; i < hosts.length; i++) {
+            LOG.info("Adding "+hosts[i]+" to cluster with " + hosts[0] + " as the bootstrap host");
+            try {
+                LOG.info("1. Introduce host "+hosts[i]+" to the cluster (join-admin)");
+                HtmlPage page = webClient.getPage(hostUrls[i]);
+                if(page.getTitleText().contains("Join a Cluster - MarkLogic Server")){
+                    LOG.info("Confirmed "+ hosts[i] + " is ready to start the process of joining the cluster");
+                }
+                HtmlForm form = page.getFormByName("join-admin");
+                form.getInputByName("server").setValueAttribute(hosts[0]);
+                HtmlImageInput input = form.getInputByName("ok");
+                page = (HtmlPage) input.click();
+                String redirectUrl = getRedirectUrl(page);
 
-        try {
-            LOG.info("Configuring the second host");
-            HtmlPage initPage = webClient.getPage("http://engrlab-129-040.engrlab.marklogic.com:8001");
-
-            if (initPage.getTitleText().equals("Server Install - MarkLogic Server - localhost")) {
-                LOG.info("Connected and got to the initialisation page");
-                HtmlForm initPageForm = initPage.getFormByName("initialize");
-                HtmlImageInput okBtn = initPageForm.getInputByName("ok");
-                HtmlPage page2 = (HtmlPage) okBtn.click();
-
-                if (page2.getTitleText().equals("Server Restart - MarkLogic Server - localhost")) {
-                    LOG.info("need to do a loop to wait");
-                    sleep();
-                    page2 = webClient.getPage("http://engrlab-129-040.engrlab.marklogic.com:8001");
+                LOG.info("2. Handling redirect: "+redirectUrl);
+                page = checkPageAndSubmitForm(webClient, hostUrls[0] + redirectUrl, "Join a Cluster - MarkLogic Server - "+hosts[0], "accept-joiner");
+                //sleep(20000);
+                //LOG.info(page.asXml());
+                LOG.info("3. Accept joiner");
+                page = clickOk(page,"accept-joiner-confirm");
+                LOG.info("4. Accept joiner");
+                page = clickOk(page,"joined-admin");
+                LOG.info("5. Joiner added? - sleep and check");
+                //redirectUrl = getRedirectUrl(page);
+                //page = webClient.getPage(hostUrls[0]+redirectUrl);
+                sleep(10000);
+                page = webClient.getPage(hostUrls[i]);
+                // LOG.info(checkTheSecondHost.asXml());
+                if(page.getTitleText().equals("Cluster Summary - MarkLogic Server - "+hosts[i])){
+                    LOG.info(hosts[i]+" has been successfully added to the cluster");
                 }
 
-                if (page2.getTitleText().equals("Join a Cluster - MarkLogic Server - engrlab-129-040.engrlab.marklogic.com")) {
-                    LOG.info("Now at the Join a Cluster page");
-                    //<input type="text" size="35" class="valid-text" name="server" value=""/>
-                    HtmlForm form2 = page2.getFormByName("join-admin");
-                    form2.getInputByName("server").setValueAttribute("engrlab-129-015.engrlab.marklogic.com");
-                    HtmlImageInput input = form2.getInputByName("ok");
-                    HtmlPage page3 = (HtmlPage) input.click();
+                //LOG.info(page.asXml());
+                // The host should now be connected and will be restarting.
+                // LOG.info(page.getTitleText());
+                //page = webClient.getPage(hostUrls[i]);
+                //LOG.info(page.getTitleText());
 
-                    // At this point we should see an html mage with a meta element (refresh)
-                    DomNodeList inputs = page3.getElementsByTagName("meta");
-                    Iterator nodesIterator = inputs.iterator();
-
-                    // get the redirect URL and go there on the primary
-                    String redirectUrl = "";
-                    while (nodesIterator.hasNext()) {
-                        DomNode element = (DomNode) nodesIterator.next();
-                      //  LOG.info(element.getAttributes().getNamedItem("content").getNodeValue());
-                        redirectUrl = element.getAttributes().getNamedItem("content").getNodeValue();
-                    }
-
-
-                    //LOG.info("TODO - now go here:" + redirectUrl.substring(redirectUrl.indexOf("=") + 1));
-                    //System.out.println(redirectUrl.substring(redirectUrl.lastIndexOf("=") + 1));
-
-                    // *** GO TO THE BOOTSTRAP HOST HERE ***
-                    HtmlPage theNextPage = webClient.getPage("http://engrlab-129-015.engrlab.marklogic.com:8001" + redirectUrl.substring(redirectUrl.indexOf("=") + 1));
-
-                    // now we have an accept joiner page
-                    // accept-joiner form
-                    HtmlForm acceptJoinerForm = theNextPage.getFormByName("accept-joiner");
-                    // click ok
-                    HtmlImageInput okInput = acceptJoinerForm.getInputByName("ok");
-                    HtmlPage anotherPage = (HtmlPage) okInput.click();
-
-
-                    HtmlForm acceptJoinerConfirmForm = anotherPage.getFormByName("accept-joiner-confirm");
-                    HtmlImageInput okInputBtn = acceptJoinerConfirmForm.getInputByName("ok");
-                    HtmlPage yetAnotherPage = (HtmlPage) okInputBtn.click();
-
-
-                    HtmlForm joinedAdminForm = yetAnotherPage.getFormByName("joined-admin");
-                    HtmlImageInput anotherOkInputBtn = joinedAdminForm.getInputByName("ok");
-                    HtmlPage oneMorePage = (HtmlPage) anotherOkInputBtn.click();
-
-                    // this is a sleep page LOG.info(oneMorePage.asXml());
-                    sleep();
-                    HtmlPage checkTheSecondHost = webClient.getPage("http://engrlab-129-040.engrlab.marklogic.com:8001");
-                    // LOG.info(checkTheSecondHost.asXml());
-                    if(checkTheSecondHost.getTitleText().equals("Cluster Summary - MarkLogic Server - engrlab-129-040.engrlab.marklogic.com")){
-                        LOG.info("Secondary host has been successfully added to the cluster");
-                    }
-
-                }
+            } catch (IOException e) {
+                e.printStackTrace();
             }
-
-        } catch (IOException e) {
-            e.printStackTrace();
         }
+
+
     }
 
-    private static HtmlPage submitForm(HtmlPage page, HtmlForm form) throws IOException {
-        // create a submit button to submit the form
-        HtmlElement button = (HtmlElement) page.createElement("button");
-        button.setAttribute("type", "submit");
-        form.appendChild(button);
-        return button.click();
+    private static String getRedirectUrl(HtmlPage page) {
+        DomNodeList inputs = page.getElementsByTagName("meta");
+        Iterator nodesIterator = inputs.iterator();
+        String redirectUrl = "";
+        while (nodesIterator.hasNext()) {
+            DomNode element = (DomNode) nodesIterator.next();
+            redirectUrl = element.getAttributes().getNamedItem("content").getNodeValue();
+        }
+        return redirectUrl.substring(redirectUrl.indexOf("=") + 1);
     }
 
-    private static void sleep() {
+    private static HtmlPage clickOk(HtmlPage page, String formName) {
         try {
-            Thread.sleep(5000);
+            //LOG.info("Form name: "+formName + " | "+page.getTitleText());
+            HtmlForm form = page.getFormByName(formName);
+            //LOG.info("Form action: "+form.getActionAttribute());
+            HtmlImageInput okBtn = form.getInputByName("ok");
+           // HtmlPage newPage = (HtmlPage) okBtn.click();
+            //LOG.info(newPage.asXml());
+            return (HtmlPage) okBtn.click(); //return (HtmlPage) okBtn.click();
+        } catch (IOException e) {
+            LOG.error("IO Exception: ",e);
+        }
+        return null;
+    }
+
+    private static HtmlPage checkPageAndSubmitForm(WebClient webClient, String hostUri, String titleElement, String formName) {
+        try {
+            HtmlPage page = webClient.getPage(hostUri);
+            LOG.info("page.getTitleText():"+page.getTitleText());
+            // LOG.info(page.asXml());
+            if(page.getTitleText().equals(titleElement)){
+                LOG.info(String.format("%s confirmed page title as: %s", hostUri, titleElement));
+            } else {
+                LOG.info(page.getTitleText());
+            }
+            HtmlForm form = page.getFormByName(formName);
+            HtmlImageInput okBtn = form.getInputByName("ok");
+            return (HtmlPage) okBtn.click();
+        } catch (IOException e) {
+           LOG.error("IO Exception: ",e);
+        }
+        return null;
+    }
+
+    private static void sleep(int millis) {
+        try {
+            Thread.sleep(millis);
         } catch (InterruptedException ex) {
             Thread.currentThread().interrupt();
         }
     }
-
 }
